@@ -54,7 +54,7 @@ def sws_cfg_check(sws_cfg):
 
 def load_switches_cfg():
 	sws_cfg = configparser.ConfigParser()
-	sws_cfg.read("switches.cfg")
+	sws_cfg.read("conf/switches.cfg")
 	retval = dict()
 	for section in sws_cfg.sections():
 		retval[section] = dict(sws_cfg.items(section))
@@ -69,7 +69,7 @@ def app_cfg_check(app_cfg):
 
 def load_app_cfg():
 	app_cfg = configparser.ConfigParser()
-	app_cfg.read("app.cfg")
+	app_cfg.read("conf/app.cfg")
 	retval = dict(app_cfg.items('APP'))
 	app_cfg_check(retval)
 	return retval
