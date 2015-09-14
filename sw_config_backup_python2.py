@@ -45,14 +45,14 @@ def backup (switch, server):
 	logging.info("Configuration from %s uploaded to tftp server %s" % (switch['name'], server))
 	return 0
 
-def sws_cfg_check(sws_cfg):
-	keys = {'username', 'password', 'name', 'ip', 'units'}
+def sws_cfg_check (sws_cfg):
+	keys = set(['username', 'password', 'name', 'ip', 'units'])
 	for section in sws_cfg:
 		for key in keys:
 			if not key in sws_cfg[section]:
 				raise Exception("Key \'%s\' in switches configuration in section \'%s\' is missing" % (key, section))
 
-def load_switches_cfg():
+def load_switches_cfg ():
 	sws_cfg = ConfigParser.ConfigParser()
 	sws_cfg.read("conf/switches.cfg")
 	retval = dict()
@@ -61,20 +61,20 @@ def load_switches_cfg():
 	sws_cfg_check(retval)
 	return retval
 
-def app_cfg_check(app_cfg):
-	keys = {'backup_dir_path', 'backup_server', 'file_expiration_timeout', 'tftp_dir_path', 'log_file'}
+def app_cfg_check (app_cfg):
+	keys =  set(['backup_dir_path', 'backup_server', 'file_expiration_timeout', 'tftp_dir_path', 'log_file'])
 	for key in keys:
 		if not key in app_cfg:
 			raise Exception("Key \'%s\' in application configuration file is missing" % (key))
 
-def load_app_cfg():
+def load_app_cfg ():
 	app_cfg = ConfigParser.ConfigParser()
 	app_cfg.read("conf/app.cfg")
 	retval = dict(app_cfg.items('APP'))
 	app_cfg_check(retval)
 	return retval
 
-def main():
+def main ():
 	app_cfg = load_app_cfg()
 	logging.basicConfig(filename=app_cfg['log_file'], level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 	switches_cfg = load_switches_cfg()
