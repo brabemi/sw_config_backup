@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 # vim:set sw=4 ts=4 et:
 
+import sys
 import pexpect
 import threading
 import os
@@ -54,7 +55,7 @@ def sws_cfg_check(sws_cfg):
 
 def load_switches_cfg():
 	sws_cfg = configparser.ConfigParser()
-	sws_cfg.read("conf/switches.cfg")
+	sws_cfg.read("%s/conf/switches.cfg" % (sys.path[0]))
 	retval = dict()
 	for section in sws_cfg.sections():
 		retval[section] = dict(sws_cfg.items(section))
@@ -69,7 +70,7 @@ def app_cfg_check(app_cfg):
 
 def load_app_cfg():
 	app_cfg = configparser.ConfigParser()
-	app_cfg.read("conf/app.cfg")
+	app_cfg.read("%s/conf/app.cfg" % (sys.path[0]))
 	retval = dict(app_cfg.items('APP'))
 	app_cfg_check(retval)
 	return retval
