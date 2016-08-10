@@ -74,6 +74,7 @@ def load_app_cfg():
 	app_cfg.read("%s/conf/app.cfg" % (sys.path[0]))
 	retval = dict(app_cfg.items('APP'))
 	app_cfg_check(retval)
+	retval['git_autocommit'] = retval['git_autocommit'] in ['True', 'true', '1', 'yes', 'y']
 	return retval
 
 def git_autocommit(app_cfg):
@@ -110,8 +111,9 @@ def main():
 			else:
 				shutil.copy2(tmp_file_path, app_cfg['backup_dir_path'])
 				logging.info("Saved %s unit %d configuration" % (switch['name'],unit))
-	if app_cfg['git_autocommit']:
+	if app_cfg['git_autocommit'] is True:
 		git_autocommit(app_cfg)
+
 	return 0
 
 if __name__ == '__main__':
