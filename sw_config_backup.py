@@ -13,42 +13,68 @@ import configparser
 import ast
 import subprocess
 
-def backup (switch, server):
+def backup(switch, server):
+	if switch['type'].lower() == '3com':
+		backup_3com(switch, server)
+	elif switch['type'].lower() == 'hp':
+		backup_hp(switch, server)
+	else:
+		logging.error("Unsupported type of switch (type: %s)" % (switch['type']))
+
+def backup_3com(switch, server):
 	try:
 		ssh=pexpect.spawn('ssh -o StrictHostKeyChecking=no %s@%s' % (switch['username'], switch['ip']))
-		#~ print('%s: connecting to ip: %s' % (switch['name'], switch['ip']))
 		logging.debug('%s: connecting to ip: %s' % (switch['name'], switch['ip']))
 		ssh.expect('password')
 	except: 
-		#~ print("Connection failed(%s)\n \t%s" % (switch['name'], ssh.before))
 		logging.error("Connection failed(%s)\n \t%s" % (switch['name'], ssh.before))
 		return 1
 	try:
 		ssh.sendline('%s' % switch['password'])
-		#~ print('%s: authenticating username: %s' % (switch['name'], switch['username']))
 		logging.debug('%s: authenticating username: %s' % (switch['name'], switch['username']))
 		ssh.expect('login')
 	except: 
-		#~ print("Authorization failed(%s)\n \tusername: %s" % (switch['name'], switch['username']))
 		logging.error("Authorization failed(%s)\n \tusername: %s" % (switch['name'], switch['username']))
 		return 2
 	try:
 		ssh.sendline("backup fabric current-configuration to %s %s.cfg" % (server, switch['name']))
-		#~ print('%s: backuping to server: %s' % (switch['name'], server))
 		logging.debug('%s: backuping to server: %s' % (switch['name'], server))
 		ssh.expect('finished!\s+<.*>',timeout=30)
 		ssh.sendline('quit')
 	except: 
-		#~ print("Backup failed(%s)\n \t%s" % (switch['name'], ssh.before))
 		logging.error("Backup failed(%s)\n \t%s" % (switch['name'], ssh.before))
 		return 3
-	#~ print("Done %s" % switch['name'])
-	#~ print("Configuration from %s uploaded to tftp server %s" % (switch['name'], server))
+	logging.info("Configuration from %s uploaded to tftp server %s" % (switch['name'], server))
+	return 0
+
+def backup_hp(switch, server):
+	try:
+		ssh=pexpect.spawn('ssh -o StrictHostKeyChecking=no %s@%s' % (switch['username'], switch['ip']))
+		logging.debug('%s: connecting to ip: %s' % (switch['name'], switch['ip']))
+		ssh.expect('password')
+	except: 
+		logging.error("Connection failed(%s)\n \t%s" % (switch['name'], ssh.before))
+		return 1
+	try:
+		ssh.sendline('%s' % switch['password'])
+		logging.debug('%s: authenticating username: %s' % (switch['name'], switch['username']))
+		ssh.expect('<.*>')
+	except: 
+		logging.error("Authorization failed(%s)\n \tusername: %s" % (switch['name'], switch['username']))
+		return 2
+	try:
+		ssh.sendline("backup fabric current-configuration to %s %s.cfg" % (server, switch['name']))
+		logging.debug('%s: backuping to server: %s' % (switch['name'], server))
+		ssh.expect('finished!\s+<.*>',timeout=30)
+		ssh.sendline('quit')
+	except: 
+		logging.error("Backup failed(%s)\n \t%s" % (switch['name'], ssh.before))
+		return 3
 	logging.info("Configuration from %s uploaded to tftp server %s" % (switch['name'], server))
 	return 0
 
 def sws_cfg_check(sws_cfg):
-	keys = {'username', 'password', 'name', 'ip', 'units'}
+	keys = {'username', 'password', 'name', 'ip', 'units', 'type'}
 	for section in sws_cfg:
 		for key in keys:
 			if not key in sws_cfg[section]:
@@ -74,7 +100,7 @@ def load_app_cfg():
 	app_cfg.read("%s/conf/app.cfg" % (sys.path[0]))
 	retval = dict(app_cfg.items('APP'))
 	app_cfg_check(retval)
-	retval['git_autocommit'] = retval['git_autocommit'] in ['True', 'true', '1', 'yes', 'y']
+	retval['git_autocommit'] = retval['git_autocommit'].lower() in ['true', '1', 'yes', 'y']
 	return retval
 
 def git_autocommit(app_cfg):
@@ -99,18 +125,26 @@ def main():
 	file_expiration_timeout = int(app_cfg['file_expiration_timeout'])
 	for section in switches_cfg:
 		switch = switches_cfg[section]
-		units = ast.literal_eval(switch['units'])
-		for unit in units:
-			tmp_file_path = "%s/%s_%d.cfg" % (app_cfg['tftp_dir_path'],switch['name'],unit)
+		if switch['type'].lower() == '3com':  
+			units = ast.literal_eval(switch['units'])
+			for unit in units:
+				tmp_file_path = "%s/%s_%d.cfg" % (app_cfg['tftp_dir_path'],switch['name'],unit)
+				if not os.access(tmp_file_path, os.R_OK):
+					logging.warning("Fail to read %s unit %d, expected file %s" % (switch['name'],unit,tmp_file_path))
+				elif (end_time - os.stat(tmp_file_path).st_mtime) > file_expiration_timeout:
+					logging.error("Configuration of %s unit %d, file %s is older than %d s, file will be ignored" % (switch['name'],unit,tmp_file_path, file_expiration_timeout))
+				else:
+					shutil.copy2(tmp_file_path, app_cfg['backup_dir_path'])
+					logging.info("Saved %s unit %d configuration" % (switch['name'],unit))
+		elif switch['type'].lower() == 'hp':  
+			tmp_file_path = "%s/%s.cfg" % (app_cfg['tftp_dir_path'],switch['name'])
 			if not os.access(tmp_file_path, os.R_OK):
-				#~ print("Fail to read %s unit %d, expected file %s" % (switch['name'],unit,tmp_file_path))
-				logging.warning("Fail to read %s unit %d, expected file %s" % (switch['name'],unit,tmp_file_path))
+				logging.warning("Fail to read %s, expected file %s" % (switch['name'],tmp_file_path))
 			elif (end_time - os.stat(tmp_file_path).st_mtime) > file_expiration_timeout:
-				#~ print("Configuration of %s unit %d, file %s is older than %d s, file will be ignored" % (switch['name'],unit,tmp_file_path,file_expiration_timeout))
-				logging.error("Configuration of %s unit %d, file %s is older than %d s, file will be ignored" % (switch['name'],unit,tmp_file_path, file_expiration_timeout))
+				logging.error("Configuration of %s, file %s is older than %d s, file will be ignored" % (switch['name'],tmp_file_path, file_expiration_timeout))
 			else:
 				shutil.copy2(tmp_file_path, app_cfg['backup_dir_path'])
-				logging.info("Saved %s unit %d configuration" % (switch['name'],unit))
+				logging.info("Saved %s configuration" % (switch['name']))
 	if app_cfg['git_autocommit'] is True:
 		git_autocommit(app_cfg)
 
