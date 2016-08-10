@@ -15,11 +15,12 @@ import subprocess
 
 def backup(switch, server):
 	if switch['type'].lower() == '3com':
-		backup_3com(switch, server)
+		return backup_3com(switch, server)
 	elif switch['type'].lower() == 'hp':
-		backup_hp(switch, server)
+		return backup_hp(switch, server)
 	else:
 		logging.error("Unsupported type of switch (type: %s)" % (switch['type']))
+		return 4
 
 def backup_3com(switch, server):
 	try:
