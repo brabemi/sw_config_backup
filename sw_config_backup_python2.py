@@ -58,12 +58,12 @@ def backup_hp(switch, server):
 	try:
 		ssh.sendline('%s' % switch['password'])
 		logging.debug('%s: authenticating username: %s' % (switch['name'], switch['username']))
-		ssh.expect('<.*>')
+		ssh.expect('>')
 	except: 
 		logging.error("Authorization failed(%s)\n \tusername: %s" % (switch['name'], switch['username']))
 		return 2
 	try:
-		ssh.sendline("backup fabric current-configuration to %s %s.cfg" % (server, switch['name']))
+		ssh.sendline("backup startup-configuration to %s %s.cfg" % (server, switch['name']))
 		logging.debug('%s: backuping to server: %s' % (switch['name'], server))
 		ssh.expect('finished!\s+<.*>',timeout=30)
 		ssh.sendline('quit')
@@ -96,7 +96,7 @@ def app_cfg_check(app_cfg):
 			raise Exception("Key \'%s\' in application configuration file is missing" % (key))
 
 def load_app_cfg():
-	app_cfg = configparser.ConfigParser()
+	app_cfg = ConfigParser.ConfigParser()
 	app_cfg.read("%s/conf/app.cfg" % (sys.path[0]))
 	retval = dict(app_cfg.items('APP'))
 	app_cfg_check(retval)
