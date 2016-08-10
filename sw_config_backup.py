@@ -11,6 +11,7 @@ import logging
 import time
 import configparser
 import ast
+import subprocess
 
 def backup (switch, server):
 	try:
@@ -63,7 +64,7 @@ def load_switches_cfg():
 	return retval
 
 def app_cfg_check(app_cfg):
-	keys = {'backup_dir_path', 'backup_server', 'file_expiration_timeout', 'tftp_dir_path', 'log_file'}
+	keys = {'backup_dir_path', 'backup_server', 'file_expiration_timeout', 'tftp_dir_path', 'log_file', 'git_autocommit'}
 	for key in keys:
 		if not key in app_cfg:
 			raise Exception("Key \'%s\' in application configuration file is missing" % (key))
@@ -74,6 +75,10 @@ def load_app_cfg():
 	retval = dict(app_cfg.items('APP'))
 	app_cfg_check(retval)
 	return retval
+
+def git_autocommit(app_cfg):
+	command = "cd %s; git add -A; git commit -a -m 'autocommit on change'" % (app_cfg['backup_dir_path'])
+	subprocess.Popen(command,stdout=subprocess.PIPE, shell=True)
 
 def main():
 	app_cfg = load_app_cfg()
@@ -105,6 +110,8 @@ def main():
 			else:
 				shutil.copy2(tmp_file_path, app_cfg['backup_dir_path'])
 				logging.info("Saved %s unit %d configuration" % (switch['name'],unit))
+	if app_cfg['git_autocommit']:
+		git_autocommit(app_cfg)
 	return 0
 
 if __name__ == '__main__':
