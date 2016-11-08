@@ -1,0 +1,4 @@
+click
+flask-restful
+SQLAlchemy
+SQLSoup
