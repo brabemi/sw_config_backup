@@ -1,4 +1,5 @@
 click
+flask
 flask-restful
 SQLAlchemy
 SQLSoup

@@ -13,7 +13,7 @@ from sqlsoup import SQLSoup
 from sqlalchemy.orm.exc import NoResultFound
 
 from flask import Flask
-from flask_restful import reqparse, abort, Api, Resource
+from flask_restful import abort, Api, Resource
 
 from pprint import pprint
 
@@ -55,7 +55,6 @@ def backup(switch, server):
 def backup_3com(switch, server):
 	try:
 		ssh=pexpect.spawn('ssh -o StrictHostKeyChecking=no %s@%s' % (switch['username'], switch['ip']))
-		#~ app.logger.debug('ssh -o StrictHostKeyChecking=no %s@%s' % (switch['username'], switch['ip']))
 		app.logger.debug('%s: connecting to ip: %s' % (switch['name'], switch['ip']))
 		ssh.expect('password')
 	except: 
@@ -63,7 +62,6 @@ def backup_3com(switch, server):
 		return 1
 	try:
 		ssh.sendline('%s' % switch['password'])
-		#~ app.logger.debug('%s' % switch['password'])
 		app.logger.debug('%s: authenticating username: %s' % (switch['name'], switch['username']))
 		ssh.expect('login')
 	except: 
@@ -71,11 +69,9 @@ def backup_3com(switch, server):
 		return 2
 	try:
 		ssh.sendline("backup fabric current-configuration to %s %s.cfg" % (server, switch['name']))
-		#~ app.logger.debug("backup fabric current-configuration to %s %s.cfg" % (server, switch['name']))
 		app.logger.debug('%s: backuping to server: %s' % (switch['name'], server))
 		ssh.expect('finished!\s+<.*>',timeout=30)
 		ssh.sendline('quit')
-		#~ app.logger.debug('quit')
 	except: 
 		app.logger.error("Backup failed(%s)\n \t%s" % (switch['name'], ssh.before))
 		return 3
@@ -176,11 +172,22 @@ def get_conf_3com(app_cfg, switch):
 	return retval
 
 
+def get_conf_hp(app_cfg, switch):
+	tmp_file_path = "%s/%s.cfg" % (app_cfg['backup_dir_path'],switch['name'])
+	if not os.access(tmp_file_path, os.R_OK):
+		#~ TODO: edit error message
+		app.logger.error("Fail to read %s unit %d, expected file %s" % (switch['name'],unit,tmp_file_path))
+		return None
+	else:
+		with open(tmp_file_path, 'rt') as config:
+			return config.read()
+
+
 def get_config(app_cfg, switch):
 	if switch['type'].lower() == '3com':
 		return get_conf_3com(app_cfg, switch)
-	#~ elif switch['type'].lower() == 'hp':
-		#~ return get_conf_3com(app_cfg, switch)
+	elif switch['type'].lower() == 'hp':
+		return get_conf_hp(app_cfg, switch)
 	else:
 		app.logger.error("Unsupported type of switch (type: %s)" % (switch['type']))
 		return 1
@@ -190,26 +197,35 @@ class SwitchBackup(Resource):
 	def get(self, sw_name):
 		db_switch = get_sw_or_abort(sw_name)
 		if db_switch.backup_in_progress is True:
-			return {'message': 'update in progress'}
-
+			return {'message': 'Backup in progress', 'last_backup': db_switch.last_backup.__str__()}
 		db_switch.backup_in_progress = True
 		db.commit()
-		switch = switch_to_dict_all(db_switch)
-
-		if backup(switch, app.config['app_config']['backup_server']):
+		if db_switch.backup_in_progress == True:
+			''' K objektu je potřeba přistoupit jinak nemá načtené položky a nelze z něj udělat dict '''
+			pass
+		try:
+			switch = switch_to_dict_all(db_switch)
+			if backup(switch, app.config['app_config']['backup_server']):
+				db_switch.backup_in_progress = False
+				db.commit()
+				return {'message': 'Backup failed'}, 500
+			if move_to_backup_folder(app.config['app_config'], switch):
+				db_switch.backup_in_progress = False
+				db.commit()
+				return {'message': 'Backup failed'}, 500
+			if app.config['app_config']['git_autocommit'] is True:
+				git_autocommit(app.config['app_config'])
+		except Exception as e:
+			app.logger.error("Error during backuping {}".format(e))
+			pprint(db_switch)
+			pprint(db_switch.__dict__)
 			db_switch.backup_in_progress = False
 			db.commit()
 			return {'message': 'Backup failed'}, 500
-		if move_to_backup_folder(app.config['app_config'], switch):
-			db_switch.backup_in_progress = False
-			db.commit()
-			return {'message': 'Backup failed'}, 500
-		if app.config['app_config']['git_autocommit'] is True:
-			git_autocommit(app.config['app_config'])
 		db_switch.backup_in_progress = False
 		db_switch.last_backup = datetime.datetime.now()
 		db.commit()
-		return {'message': 'Backup complete'}
+		return {'message': 'Backup finished'}
 
 
 class Switch(Resource):
@@ -224,7 +240,7 @@ class SwitchConfig(Resource):
 			return {'message': 'No config'}
 		switch = switch_to_dict_web(switch)
 		configs = get_config(app.config['app_config'], switch)
-		return {"date": switch['last_backup'], "configs": configs}
+		return {'last_backup': switch['last_backup'], "configs": configs}
 
 
 class Switches(Resource):
@@ -263,11 +279,11 @@ session = scoped_session(
 )
 db = SQLSoup(engine, session=session)
 
-#~ api.add_resource(Switches, '/')
-api.add_resource(Switches, '/switch/')
-api.add_resource(Switch, '/switch/<sw_name>/')
-api.add_resource(SwitchBackup, '/switch/<sw_name>/backup')
-api.add_resource(SwitchConfig, '/switch/<sw_name>/config')
+
+api.add_resource(Switches, '/', '/switch/')
+api.add_resource(Switch, '/<string:sw_name>/', '/switch/<string:sw_name>/')
+api.add_resource(SwitchBackup, '/<string:sw_name>/backup', '/switch/<string:sw_name>/backup')
+api.add_resource(SwitchConfig, '/<string:sw_name>/config', '/switch/<string:sw_name>/config')
 
 
 if __name__ == '__main__':
