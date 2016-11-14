@@ -2,3 +2,4 @@ click
 flask-restful
 SQLAlchemy
 SQLSoup
+pexpect
