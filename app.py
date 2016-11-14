@@ -20,8 +20,6 @@ from pprint import pprint
 
 def switch_to_dict_all(switch):
 	tmp_switch = switch.__dict__
-	#~ pprint(switch)
-	#~ pprint(tmp_switch)
 	tmp_switch['units'] = [int(i) for i in tmp_switch['units'].split(',')]
 	tmp_switch['last_backup'] = tmp_switch['last_backup'].__str__()
 	return tmp_switch
@@ -173,7 +171,8 @@ def get_conf_3com(app_cfg, switch):
 			app.logger.error("Fail to read %s unit %d, expected file %s" % (switch['name'],unit,tmp_file_path))
 			retval[unit] = None
 		else:
-			retval[unit] = tmp_file_path
+			with open(tmp_file_path, 'rt') as config:
+				retval[unit] = config.read()
 	return retval
 
 
@@ -195,7 +194,6 @@ class SwitchBackup(Resource):
 
 		db_switch.backup_in_progress = True
 		db.commit()
-		#~ pprint(db_switch)
 		switch = switch_to_dict_all(db_switch)
 
 		if backup(switch, app.config['app_config']['backup_server']):
