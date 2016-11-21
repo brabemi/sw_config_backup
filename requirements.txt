@@ -4,3 +4,5 @@ flask-restful
 SQLAlchemy
 SQLSoup
 pexpect
+celery
+redis

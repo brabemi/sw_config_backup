@@ -15,7 +15,22 @@ from sqlalchemy.orm.exc import NoResultFound
 from flask import Flask
 from flask_restful import abort, Api, Resource
 
+from celery import Celery
+
 from pprint import pprint
+
+
+app = Flask(__name__)
+api = Api(app)
+
+
+# Celery configuration
+app.config['CELERY_BROKER_URL'] = 'redis://localhost:6379/0'
+app.config['CELERY_RESULT_BACKEND'] = 'redis://localhost:6379/0'
+
+# Initialize Celery
+celery = Celery(app.name, broker=app.config['CELERY_BROKER_URL'])
+celery.conf.update(app.config)
 
 
 def switch_to_dict_all(switch):
@@ -31,6 +46,11 @@ def switch_to_dict_web(switch):
 	tmp_switch.pop('password')
 	tmp_switch.pop('username')
 	tmp_switch.pop('id')
+	return tmp_switch
+
+def switch_to_dict_ser(switch):
+	tmp_switch = switch_to_dict_all(switch)
+	tmp_switch.pop('_sa_instance_state')
 	return tmp_switch
 
 
@@ -57,14 +77,14 @@ def backup_3com(switch, server):
 		ssh=pexpect.spawn('ssh -o StrictHostKeyChecking=no %s@%s' % (switch['username'], switch['ip']))
 		app.logger.debug('%s: connecting to ip: %s' % (switch['name'], switch['ip']))
 		ssh.expect('password')
-	except: 
+	except:
 		app.logger.error("Connection failed(%s)\n \t%s" % (switch['name'], ssh.before))
 		return 1
 	try:
 		ssh.sendline('%s' % switch['password'])
 		app.logger.debug('%s: authenticating username: %s' % (switch['name'], switch['username']))
 		ssh.expect('login')
-	except: 
+	except:
 		app.logger.error("Authorization failed(%s)\n \tusername: %s" % (switch['name'], switch['username']))
 		return 2
 	try:
@@ -72,7 +92,7 @@ def backup_3com(switch, server):
 		app.logger.debug('%s: backuping to server: %s' % (switch['name'], server))
 		ssh.expect('finished!\s+<.*>',timeout=30)
 		ssh.sendline('quit')
-	except: 
+	except:
 		app.logger.error("Backup failed(%s)\n \t%s" % (switch['name'], ssh.before))
 		return 3
 	app.logger.info("Configuration from %s uploaded to tftp server %s" % (switch['name'], server))
@@ -84,14 +104,14 @@ def backup_hp(switch, server):
 		ssh=pexpect.spawn('ssh -o StrictHostKeyChecking=no %s@%s' % (switch['username'], switch['ip']))
 		app.logger.debug('%s: connecting to ip: %s' % (switch['name'], switch['ip']))
 		ssh.expect('password')
-	except: 
+	except:
 		app.logger.error("Connection failed(%s)\n \t%s" % (switch['name'], ssh.before))
 		return 1
 	try:
 		ssh.sendline('%s' % switch['password'])
 		app.logger.debug('%s: authenticating username: %s' % (switch['name'], switch['username']))
 		ssh.expect('>')
-	except: 
+	except:
 		app.logger.error("Authorization failed(%s)\n \tusername: %s" % (switch['name'], switch['username']))
 		return 2
 	try:
@@ -99,7 +119,7 @@ def backup_hp(switch, server):
 		app.logger.debug('%s: backuping to server: %s' % (switch['name'], server))
 		ssh.expect('finished!\s+<.*>',timeout=30)
 		ssh.sendline('quit')
-	except: 
+	except:
 		app.logger.error("Backup failed(%s)\n \t%s" % (switch['name'], ssh.before))
 		return 3
 	app.logger.info("Configuration from %s uploaded to tftp server %s" % (switch['name'], server))
@@ -251,6 +271,66 @@ class Switches(Resource):
 		return data
 
 
+@celery.task
+def backup_procedure(switch, app_cfg):
+	mydb = make_db_session(app_cfg['database'])
+	db_switch = mydb.switch.get(switch['id'])
+	if backup(switch, app_cfg['backup_server']):
+		db_switch.backup_in_progress = False
+		mydb.commit()
+		return 'Fail during backup'
+	if move_to_backup_folder(app_cfg, switch):
+		db_switch.backup_in_progress = False
+		mydb.commit()
+		return 'Fail during moving'
+	if app_cfg['git_autocommit'] is True:
+		git_autocommit(app_cfg)
+	db_switch.backup_in_progress = False
+	db_switch.last_backup = datetime.datetime.now()
+	mydb.commit()
+	return 'OK'
+
+
+class CeleryBackup(Resource):
+	def get(self, sw_name):
+		db_switch = get_sw_or_abort(sw_name)
+		if db_switch.backup_in_progress is True:
+			return {'message': 'Backup in progress', 'last_backup': db_switch.last_backup.__str__()}
+		db_switch.backup_in_progress = True
+		db.commit()
+		if db_switch.backup_in_progress == True:
+			''' K objektu je potřeba přistoupit jinak nemá načtené položky a nelze z něj udělat dict '''
+			pass
+		try:
+			switch = switch_to_dict_ser(db_switch)
+			backup_procedure.delay(switch, app.config['app_config'])
+		except Exception as e:
+			app.logger.error("Error during backuping {}".format(e))
+			db_switch.backup_in_progress = False
+			db.commit()
+			return {'message': 'Backup failed'}, 500
+		return {'message': 'Backup added to queue'}
+
+
+class CeleryBackupAll(Resource):
+	def get(self):
+		for db_switch in db.switch.all():
+			if db_switch.backup_in_progress is False:
+				db_switch.backup_in_progress = True
+				db.commit()
+				if db_switch.backup_in_progress == True:
+					''' K objektu je potřeba přistoupit jinak nemá načtené položky a nelze z něj udělat dict '''
+					pass
+				try:
+					switch = switch_to_dict_ser(db_switch)
+					backup_procedure.delay(switch, app.config['app_config'])
+				except Exception as e:
+					app.logger.error("Error during backuping {}".format(e))
+					db_switch.backup_in_progress = False
+					db.commit()
+		return {'message': 'Backups added to queue'}
+
+
 def app_cfg_check(app_cfg):
 	keys = {'backup_dir_path', 'backup_server', 'file_expiration_timeout', 'tftp_dir_path', 'log_file', 'git_autocommit'}
 	for key in keys:
@@ -267,23 +347,31 @@ def load_app_cfg():
 	return retval
 
 
-app = Flask(__name__)
-api = Api(app)
+def make_db_session(database):
+	engine = create_engine(database, convert_unicode=True)
+	session = scoped_session(
+		sessionmaker(autocommit=False, autoflush=False)
+	)
+	return SQLSoup(engine, session=session)
+
 
 app_cfg = load_app_cfg()
 app.config['app_config'] = app_cfg
 
-engine = create_engine(app.config['app_config']['database'], convert_unicode=True)
-session = scoped_session(
-	sessionmaker(autocommit=False, autoflush=False)
-)
-db = SQLSoup(engine, session=session)
+# engine = create_engine(app.config['app_config']['database'], convert_unicode=True)
+# session = scoped_session(
+# 	sessionmaker(autocommit=False, autoflush=False)
+# )
+db = make_db_session(app.config['app_config']['database'])
 
 
 api.add_resource(Switches, '/', '/switch/')
 api.add_resource(Switch, '/<string:sw_name>/', '/switch/<string:sw_name>/')
-api.add_resource(SwitchBackup, '/<string:sw_name>/backup', '/switch/<string:sw_name>/backup')
-api.add_resource(SwitchConfig, '/<string:sw_name>/config', '/switch/<string:sw_name>/config')
+# api.add_resource(SwitchBackup, '/<string:sw_name>/backup/', '/switch/<string:sw_name>/backup/')
+api.add_resource(CeleryBackup, '/<string:sw_name>/backup/', '/switch/<string:sw_name>/backup/')
+# api.add_resource(CeleryBackup, '/celery/<string:sw_name>/backup/', '/celery/switch/<string:sw_name>/backup/')
+api.add_resource(CeleryBackupAll, '/backup/all/', '/switch/backup/all/')
+api.add_resource(SwitchConfig, '/<string:sw_name>/config/', '/switch/<string:sw_name>/config/')
 
 
 if __name__ == '__main__':
