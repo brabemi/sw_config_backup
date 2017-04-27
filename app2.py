@@ -6,37 +6,21 @@ import shutil
 import subprocess
 import os
 import datetime
+import queue
+import threading
+
+import flask
 
 from sqlalchemy.orm import scoped_session, sessionmaker
 from sqlalchemy import create_engine
 from sqlsoup import SQLSoup
 from sqlalchemy.orm.exc import NoResultFound
 
-from flask import Flask
-from flask_restful import abort, Api, Resource
-
-from celery import Celery
-
-from pprint import pprint
-
-
-app = Flask(__name__)
-api = Api(app)
-
-
-# Celery configuration
-app.config['CELERY_BROKER_URL'] = 'redis://localhost:6379/0'
-app.config['CELERY_RESULT_BACKEND'] = 'redis://localhost:6379/0'
-
-# Initialize Celery
-celery = Celery(app.name, broker=app.config['CELERY_BROKER_URL'])
-celery.conf.update(app.config)
-
 
 def switch_to_dict_all(switch):
     tmp_switch = switch.__dict__
     tmp_switch['units'] = [int(i) for i in tmp_switch['units'].split(',')]
-    tmp_switch['last_backup'] = tmp_switch['last_backup'].__str__()
+    tmp_switch['last_backup'] = str(tmp_switch['last_backup'])
     return tmp_switch
 
 
@@ -59,7 +43,7 @@ def get_sw_or_abort(sw_name):
     try:
         switch = db.switch.filter_by(name=sw_name).one()
     except NoResultFound:
-        abort(404, message="Switch {} doesn't exist".format(sw_name))
+        flask.abort(404, flask.jsonify({'message': "Switch {} doesn't exist".format(sw_name)}))
     return switch
 
 
@@ -77,21 +61,21 @@ def backup_3com(switch, server):
     try:
         ssh = pexpect.spawn('ssh -o StrictHostKeyChecking=no %s@%s' % (switch['username'], switch['ip']))
         app.logger.debug('%s: connecting to ip: %s' % (switch['name'], switch['ip']))
-        ssh.expect('password')
+        ssh.expect('password', timeout=60)
     except:
         app.logger.error("Connection failed(%s)\n \t%s" % (switch['name'], ssh.before))
         return 1
     try:
         ssh.sendline('%s' % switch['password'])
         app.logger.debug('%s: authenticating username: %s' % (switch['name'], switch['username']))
-        ssh.expect('login')
+        ssh.expect('login', timeout=60)
     except:
         app.logger.error("Authorization failed(%s)\n \tusername: %s" % (switch['name'], switch['username']))
         return 2
     try:
         ssh.sendline("backup fabric current-configuration to %s %s.cfg" % (server, switch['name']))
         app.logger.debug('%s: backuping to server: %s' % (switch['name'], server))
-        ssh.expect('finished!\s+<.*>', timeout=30)
+        ssh.expect('finished!\s+<.*>', timeout=60)
         ssh.sendline('quit')
     except:
         app.logger.error("Backup failed(%s)\n \t%s" % (switch['name'], ssh.before))
@@ -104,21 +88,21 @@ def backup_hp(switch, server):
     try:
         ssh = pexpect.spawn('ssh -o StrictHostKeyChecking=no %s@%s' % (switch['username'], switch['ip']))
         app.logger.debug('%s: connecting to ip: %s' % (switch['name'], switch['ip']))
-        ssh.expect('password')
+        ssh.expect('password', timeout=60)
     except:
         app.logger.error("Connection failed(%s)\n \t%s" % (switch['name'], ssh.before))
         return 1
     try:
         ssh.sendline('%s' % switch['password'])
         app.logger.debug('%s: authenticating username: %s' % (switch['name'], switch['username']))
-        ssh.expect('>')
+        ssh.expect('>', timeout=60)
     except:
         app.logger.error("Authorization failed(%s)\n \tusername: %s" % (switch['name'], switch['username']))
         return 2
     try:
         ssh.sendline("backup startup-configuration to %s %s.cfg" % (server, switch['name']))
         app.logger.debug('%s: backuping to server: %s' % (switch['name'], server))
-        ssh.expect('finished!\s+<.*>', timeout=30)
+        ssh.expect('finished!\s+<.*>', timeout=60)
         ssh.sendline('quit')
     except:
         app.logger.error("Backup failed(%s)\n \t%s" % (switch['name'], ssh.before))
@@ -190,7 +174,6 @@ def get_conf_3com(app_cfg, switch):
     for unit in switch['units']:
         tmp_file_path = "%s/%s_%d.cfg" % (app_cfg['backup_dir_path'], switch['name'], unit)
         if not os.access(tmp_file_path, os.R_OK):
-            #~ TODO: edit error message
             app.logger.error("Fail to read %s unit %d, expected file %s" % (switch['name'], unit, tmp_file_path))
             retval[unit] = None
         else:
@@ -202,7 +185,6 @@ def get_conf_3com(app_cfg, switch):
 def get_conf_hp(app_cfg, switch):
     tmp_file_path = "%s/%s.cfg" % (app_cfg['backup_dir_path'], switch['name'])
     if not os.access(tmp_file_path, os.R_OK):
-        #~ TODO: edit error message
         app.logger.error("Fail to read %s, expected file %s" % (switch['name'], tmp_file_path))
         return None
     else:
@@ -220,127 +202,10 @@ def get_config(app_cfg, switch):
         return 1
 
 
-class SwitchBackup(Resource):
-    def get(self, sw_name):
-        db_switch = get_sw_or_abort(sw_name)
-        if db_switch.backup_in_progress is True:
-            return {'message': 'Backup in progress', 'last_backup': db_switch.last_backup.__str__()}
-        db_switch.backup_in_progress = True
-        db.commit()
-        if db_switch.backup_in_progress is True:
-            ''' K objektu je potřeba přistoupit jinak nemá načtené položky a nelze z něj udělat dict '''
-            pass
-        try:
-            switch = switch_to_dict_all(db_switch)
-            if backup(switch, app.config['app_config']['backup_server']):
-                db_switch.backup_in_progress = False
-                db.commit()
-                return {'message': 'Backup failed'}, 500
-            if move_to_backup_folder(app.config['app_config'], switch):
-                db_switch.backup_in_progress = False
-                db.commit()
-                return {'message': 'Backup failed'}, 500
-            if app.config['app_config']['git_autocommit'] is True:
-                git_autocommit(app.config['app_config'])
-        except Exception as e:
-            app.logger.error("Error during backuping {}".format(e))
-            pprint(db_switch)
-            pprint(db_switch.__dict__)
-            db_switch.backup_in_progress = False
-            db.commit()
-            return {'message': 'Backup failed'}, 500
-        db_switch.backup_in_progress = False
-        db_switch.last_backup = datetime.datetime.now()
-        db.commit()
-        return {'message': 'Backup finished'}
-
-
-class Switch(Resource):
-    def get(self, sw_name):
-        return switch_to_dict_web(get_sw_or_abort(sw_name))
-
-
-class SwitchConfig(Resource):
-    def get(self, sw_name):
-        switch = get_sw_or_abort(sw_name)
-        if switch.last_backup is None:
-            return {'message': 'No config'}
-        switch = switch_to_dict_web(switch)
-        configs = get_config(app.config['app_config'], switch)
-        return {'last_backup': switch['last_backup'], "configs": configs}
-
-
-class Switches(Resource):
-    def get(self):
-        data = []
-        for switch in db.switch.all():
-            data.append(switch_to_dict_web(switch))
-        return data
-
-
-@celery.task
-def backup_procedure(switch, app_cfg):
-    mydb = make_db_session(app_cfg['database'])
-    db_switch = mydb.switch.get(switch['id'])
-    if backup(switch, app_cfg['backup_server']):
-        db_switch.backup_in_progress = False
-        mydb.commit()
-        return 'Fail during backup'
-    if move_to_backup_folder(app_cfg, switch):
-        db_switch.backup_in_progress = False
-        mydb.commit()
-        return 'Fail during moving'
-    if app_cfg['git_autocommit'] is True:
-        git_autocommit(app_cfg)
-    db_switch.backup_in_progress = False
-    db_switch.last_backup = datetime.datetime.now()
-    mydb.commit()
-    return 'OK'
-
-
-class CeleryBackup(Resource):
-    def get(self, sw_name):
-        db_switch = get_sw_or_abort(sw_name)
-        if db_switch.backup_in_progress is True:
-            return {'message': 'Backup in progress', 'last_backup': db_switch.last_backup.__str__()}
-        db_switch.backup_in_progress = True
-        db.commit()
-        if db_switch.backup_in_progress is True:
-            ''' K objektu je potřeba přistoupit jinak nemá načtené položky a nelze z něj udělat dict '''
-            pass
-        try:
-            switch = switch_to_dict_ser(db_switch)
-            backup_procedure.delay(switch, app.config['app_config'])
-        except Exception as e:
-            app.logger.error("Error during backuping {}".format(e))
-            db_switch.backup_in_progress = False
-            db.commit()
-            return {'message': 'Backup failed'}, 500
-        return {'message': 'Backup added to queue'}
-
-
-class CeleryBackupAll(Resource):
-    def get(self):
-        for db_switch in db.switch.all():
-            if db_switch.backup_in_progress is False:
-                db_switch.backup_in_progress = True
-                db.commit()
-                if db_switch.backup_in_progress is True:
-                    ''' K objektu je potřeba přistoupit jinak nemá načtené položky a nelze z něj udělat dict '''
-                    pass
-                try:
-                    switch = switch_to_dict_ser(db_switch)
-                    backup_procedure.delay(switch, app.config['app_config'])
-                except Exception as e:
-                    app.logger.error("Error during backuping {}".format(e))
-                    db_switch.backup_in_progress = False
-                    db.commit()
-        return {'message': 'Backups added to queue'}
-
-
 def app_cfg_check(app_cfg):
     keys = {
-        'backup_dir_path', 'backup_server', 'file_expiration_timeout', 'tftp_dir_path', 'log_file', 'git_autocommit'
+        'backup_dir_path', 'backup_server', 'file_expiration_timeout', 'tftp_dir_path',
+        'log_file', 'git_autocommit', 'database', 'worker_threads',
     }
     for key in keys:
         if key not in app_cfg:
@@ -353,6 +218,7 @@ def load_app_cfg():
     retval = dict(app_cfg.items('APP'))
     app_cfg_check(retval)
     retval['git_autocommit'] = retval['git_autocommit'].lower() in ['true', '1', 'yes', 'y']
+    retval['worker_threads'] = int(retval['worker_threads'])
     return retval
 
 
@@ -364,23 +230,119 @@ def make_db_session(database):
     return SQLSoup(engine, session=session)
 
 
+def backup_task(switch):
+    if backup(switch, app_cfg['backup_server']) != 0:
+        # print('Fail during backup')
+        return 1
+    if move_to_backup_folder(app_cfg, switch) != 0:
+        # print('Fail during moving')
+        return 2
+    if app_cfg['git_autocommit'] is True:
+        git_autocommit(app_cfg)
+    return 0
+
+
+def worker():
+    mydb = make_db_session(app_cfg['database'])
+    while True:
+        switch_id = tasks.get()
+        db_switch = mydb.switch.get(switch_id)
+        switch = switch_to_dict_all(db_switch)
+        result = backup_task(switch)
+        db_switch.backup_in_progress = False
+        if result == 0:
+            db_switch.last_backup = datetime.datetime.now()
+        mydb.commit()
+        tasks.task_done()
+
+
+app = flask.Flask(__name__)
+
 app_cfg = load_app_cfg()
 app.config['app_config'] = app_cfg
 
-# engine = create_engine(app.config['app_config']['database'], convert_unicode=True)
-# session = scoped_session(
-#     sessionmaker(autocommit=False, autoflush=False)
-# )
+tasks = queue.Queue()
+threads = []
+for i in range(app_cfg['worker_threads']):
+    t = threading.Thread(target=worker)
+    t.start()
+    threads.append(t)
+
 db = make_db_session(app.config['app_config']['database'])
 
 
-api.add_resource(Switches, '/', '/switch/')
-api.add_resource(Switch, '/<string:sw_name>/', '/switch/<string:sw_name>/')
-# api.add_resource(SwitchBackup, '/<string:sw_name>/backup/', '/switch/<string:sw_name>/backup/')
-api.add_resource(CeleryBackup, '/<string:sw_name>/backup/', '/switch/<string:sw_name>/backup/')
-# api.add_resource(CeleryBackup, '/celery/<string:sw_name>/backup/', '/celery/switch/<string:sw_name>/backup/')
-api.add_resource(CeleryBackupAll, '/backup/all/', '/switch/backup/all/')
-api.add_resource(SwitchConfig, '/<string:sw_name>/config/', '/switch/<string:sw_name>/config/')
+@app.route('/', methods=['GET'])
+def get_all_switches():
+    data = []
+    for switch in db.switch.all():
+        data.append(switch_to_dict_web(switch))
+    return flask.jsonify(data)
+
+
+@app.route('/backup-all/', methods=['GET'])
+def nonblocking_backup_all():
+    for db_switch in db.switch.all():
+        if db_switch.backup_in_progress is False:
+            db_switch.backup_in_progress = True
+            db.commit()
+            try:
+                tasks.put(db_switch.id)
+            except Exception as e:
+                app.logger.error("Error during backuping {}".format(e))
+                db_switch.backup_in_progress = False
+                db.commit()
+    return flask.jsonify({'message': 'Backups added to queue'})
+
+
+@app.route('/clear-all/', methods=['GET'])
+def clear_all():
+    for db_switch in db.switch.all():
+        if db_switch.backup_in_progress is True:
+            db_switch.backup_in_progress = False
+    db.commit()
+    return flask.jsonify({'message': 'Statuses cleared'})
+
+
+@app.route('/<string:sw_name>/', methods=['GET'])
+def get_switch(sw_name):
+    # TODO: non existing name
+    return flask.jsonify(switch_to_dict_web(get_sw_or_abort(sw_name)))
+
+
+@app.route('/<string:sw_name>/config/', methods=['GET'])
+def get_switch_config(sw_name):
+    switch = get_sw_or_abort(sw_name)
+    if switch.last_backup is None:
+        return flask.jsonify({'message': 'No config'})
+    switch = switch_to_dict_web(switch)
+    configs = get_config(app.config['app_config'], switch)
+    return flask.jsonify({'last_backup': switch['last_backup'], "configs": configs})
+
+
+@app.route('/<string:sw_name>/backup/', methods=['GET'])
+def nonblocking_backup(sw_name):
+    db_switch = get_sw_or_abort(sw_name)
+    if db_switch.backup_in_progress is True:
+        return flask.jsonify({'message': 'Backup in progress', 'last_backup': str(db_switch.last_backup)})
+    db_switch.backup_in_progress = True
+    db.commit()
+    try:
+        tasks.put(db_switch.id)
+    except Exception as e:
+        app.logger.error("Error during backuping {}".format(e))
+        db_switch.backup_in_progress = False
+        db.commit()
+        return flask.jsonify({'message': 'Backup failed'}), 500
+    return flask.jsonify({'message': 'Backup added to queue'})
+
+
+@app.route('/<string:sw_name>/clear/', methods=['GET'])
+def clear(sw_name):
+    db_switch = get_sw_or_abort(sw_name)
+    if db_switch.backup_in_progress is True:
+        db_switch.backup_in_progress = False
+        db.commit()
+    return flask.jsonify({'message': 'Status cleared'})
 
 
 if __name__ == '__main__':
