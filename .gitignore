@@ -1,7 +1,5 @@
 *.pyo
 *.pyc
 __pycache__/*
-*.cfg
 data
 env
-!*example.cfg
