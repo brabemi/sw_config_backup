@@ -8,6 +8,8 @@ import os
 import datetime
 import queue
 import threading
+import signal
+import logging
 
 import flask
 from functools import wraps
@@ -206,7 +208,7 @@ def get_config(app_cfg, switch):
 
 def app_cfg_check(app_cfg):
     keys = {
-        'backup_dir_path', 'backup_server', 'file_expiration_timeout', 'tftp_dir_path', 'log_file',
+        'backup_dir_path', 'backup_server', 'file_expiration_timeout', 'tftp_dir_path', 'log_file', 'log_level',
         'git_autocommit', 'database', 'worker_threads', 'username', 'password', 'key_path', 'crt_path'
     }
     for key in keys:
@@ -221,6 +223,12 @@ def load_app_cfg():
     app_cfg_check(retval)
     retval['git_autocommit'] = retval['git_autocommit'].lower() in ['true', '1', 'yes', 'y']
     retval['worker_threads'] = int(retval['worker_threads'])
+    log_levels = {
+        'debug': logging.DEBUG, 'info': logging.INFO, 'warning': logging.WARNING,
+        'error': logging.ERROR, 'critical': logging.CRITICAL
+    }
+    log_level = retval['log_level'].lower()
+    retval['log_level'] = log_levels[log_level] if log_level in log_levels else logging.INFO
     return retval
 
 
@@ -247,16 +255,43 @@ def backup_task(switch):
 def worker():
     mydb = make_db_session(app_cfg['database'])
     while True:
+        if program_closed:
+            break
         switch_id = tasks.get()
-        db_switch = mydb.switch.get(switch_id)
-        switch = switch_to_dict_all(db_switch)
-        result = backup_task(switch)
-        db_switch.backup_in_progress = False
-        if result == 0:
-            db_switch.last_backup = datetime.datetime.now()
-        mydb.commit()
+        if switch_id is not None:
+            db_switch = mydb.switch.get(switch_id)
+            switch = switch_to_dict_all(db_switch)
+            result = backup_task(switch)
+            db_switch.backup_in_progress = False
+            if result == 0:
+                db_switch.last_backup = datetime.datetime.now()
+            mydb.commit()
         tasks.task_done()
+    return
 
+
+# TODO - fake task to unlock threads, handle other tasks, close hreads and exit
+def sigint_handler(signum, frame):
+    global program_closed
+    program_closed = True
+    for thred in threads:
+        tasks.put(None)
+    app.logger.info('Waiting for the termination of the workers threads')
+    for thred in threads:
+        thred.join()
+    while True:
+        try:
+            switch_id = tasks.get_nowait()
+            if switch_id is not None:
+                db_switch = db.switch.get(switch_id)
+                db_switch.backup_in_progress = False
+                db.commit()
+            tasks.task_done()
+        except queue.Empty:
+            break
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, sigint_handler)
 
 app = flask.Flask(__name__)
 
@@ -264,6 +299,7 @@ app_cfg = load_app_cfg()
 app.config['app_config'] = app_cfg
 
 tasks = queue.Queue()
+program_closed = False
 threads = []
 for i in range(app_cfg['worker_threads']):
     t = threading.Thread(target=worker)
@@ -316,7 +352,8 @@ def nonblocking_backup_all():
             db_switch.backup_in_progress = True
             db.commit()
             try:
-                tasks.put(db_switch.id)
+                if not program_closed:
+                    tasks.put(db_switch.id)
             except Exception as e:
                 app.logger.error("Error during backuping {}".format(e))
                 db_switch.backup_in_progress = False
@@ -361,7 +398,8 @@ def nonblocking_backup(sw_name):
     db_switch.backup_in_progress = True
     db.commit()
     try:
-        tasks.put(db_switch.id)
+        if not program_closed:
+            tasks.put(db_switch.id)
     except Exception as e:
         app.logger.error("Error during backuping {}".format(e))
         db_switch.backup_in_progress = False
@@ -381,5 +419,19 @@ def clear(sw_name):
 
 
 if __name__ == '__main__':
+    formatter = logging.Formatter('[%(asctime)s] %(levelname)s - %(message)s')
+
+    handler = logging.FileHandler(app.config['app_config']['log_file'])
+    handler.setLevel(app.config['app_config']['log_level'])
+    handler.setFormatter(formatter)
+
+    handler2 = logging.StreamHandler()
+    handler2.setLevel(app.config['app_config']['log_level'])
+    handler2.setFormatter(formatter)
+
+    app.logger.addHandler(handler)
+    app.logger.addHandler(handler2)
+    app.logger.setLevel(app.config['app_config']['log_level'])
+
     context = (app_cfg['crt_path'], app_cfg['key_path'])
-    app.run(host='0.0.0.0', ssl_context=context, debug=True)
+    app.run(host='0.0.0.0', ssl_context=context)
