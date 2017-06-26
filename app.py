@@ -270,7 +270,6 @@ def worker():
     return
 
 
-# TODO - fake task to unlock threads, handle other tasks, close hreads and exit
 def sigint_handler(signum, frame):
     global program_closed
     program_closed = True
