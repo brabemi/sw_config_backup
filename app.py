@@ -291,6 +291,7 @@ def sigint_handler(signum, frame):
     sys.exit(0)
 
 signal.signal(signal.SIGINT, sigint_handler)
+signal.signal(signal.SIGTERM, sigint_handler)
 
 app = flask.Flask(__name__)
 
