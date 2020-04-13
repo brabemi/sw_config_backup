@@ -10,6 +10,7 @@ import queue
 import threading
 import signal
 import logging
+import re
 
 import flask
 from functools import wraps
@@ -56,6 +57,8 @@ def backup(switch, server):
         return backup_3com(switch, server)
     elif switch['type'].lower() == 'hp':
         return backup_hp(switch, server)
+    elif switch['type'].lower() == 'aruba':
+        return backup_aruba(switch, server)
     else:
         app.logger.error("Unsupported type of switch (type: %s)" % (switch['type']))
         return 4
@@ -115,6 +118,54 @@ def backup_hp(switch, server):
     return 0
 
 
+def backup_aruba(switch, server):
+    try:
+        ssh = pexpect.spawn('ssh -o StrictHostKeyChecking=no %s@%s' % (switch['username'], switch['ip']))
+        app.logger.debug('%s: connecting to ip: %s' % (switch['name'], switch['ip']))
+        ssh.expect('password', timeout=60)
+    except:
+        app.logger.error("Connection failed(%s)\n \t%s" % (switch['name'], ssh.before))
+        return 1
+    try:
+        ssh.sendline('%s' % switch['password'])
+        app.logger.debug('%s: authenticating username: %s' % (switch['name'], switch['username']))
+        ssh.expect('to continue', timeout=60)
+        ssh.sendline('')
+        ssh.expect('#', timeout=60)
+    except:
+        app.logger.error("Authorization failed(%s)\n \tusername: %s" % (switch['name'], switch['username']))
+        return 2
+    try:
+        app.logger.debug('%s: backuping to server: %s' % (switch['name'], server))
+        ssh.sendline('copy running-config tftp %s %s_rc.cfg' % (server, switch['name']))
+        ssh.expect('#', timeout=60)
+        ssh.sendline('copy startup-config tftp %s %s_sc.cfg' % (server, switch['name']))
+        ssh.expect('#', timeout=60)
+        ssh.sendline('no page')
+        ssh.expect('#', timeout=60)
+        delimiter = ssh.before[-8:] + b'#'
+        ssh.sendline('show running-config structured')
+        ssh.expect(delimiter, timeout=120)
+        data = ssh.before
+        ssh.sendline('quit')
+        ssh.expect('>', timeout=60)
+        ssh.sendline('quit')
+        ssh.expect('(y/n)', timeout=60)
+        ssh.sendline('y')
+        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+        result = ansi_escape.sub('', data.decode("utf-8"))
+        result = result.splitlines()[3:-2]
+        file_path = "%s/%s_rc_struct.cfg" % (app_cfg['backup_dir_path'], switch['name'])
+        with open(file_path, 'w') as file:
+            file.writelines(l + '\n' for l in result)
+    except:
+        app.logger.error("Backup failed(%s)\n \t%s" % (switch['name'], ssh.before))
+        return 3
+    app.logger.info("Configuration from %s uploaded to tftp server %s" % (switch['name'], server))
+    
+    return 0
+
+
 def move_3com(app_cfg, switch):
     retval = 1
 
@@ -158,11 +209,38 @@ def move_hp(app_cfg, switch):
     return retval
 
 
+def move_aruba(app_cfg, switch):
+    retval = 1
+
+    end_time = time.time()
+    file_expiration_timeout = int(app_cfg['file_expiration_timeout'])
+    tmp_file_paths = [
+        "%s/%s_rc.cfg" % (app_cfg['tftp_dir_path'], switch['name']),
+        "%s/%s_sc.cfg" % (app_cfg['tftp_dir_path'], switch['name'])
+    ]
+
+    for tmp_file_path in tmp_file_paths:
+        if not os.access(tmp_file_path, os.R_OK):
+            app.logger.error("Fail to read %s, expected file %s" % (switch['name'], tmp_file_path))
+        elif (end_time - os.stat(tmp_file_path).st_mtime) > file_expiration_timeout:
+            app.logger.error(
+                "Configuration of %s, file %s is older than %d s, file will be ignored" %
+                (switch['name'], tmp_file_path, file_expiration_timeout)
+            )
+        else:
+            shutil.copy2(tmp_file_path, app_cfg['backup_dir_path'])
+            app.logger.info("Saved %s configuration" % (switch['name']))
+            retval = 0
+    return retval
+
+
 def move_to_backup_folder(app_cfg, switch):
     if switch['type'].lower() == '3com':
         return move_3com(app_cfg, switch)
     elif switch['type'].lower() == 'hp':
         return move_hp(app_cfg, switch)
+    elif switch['type'].lower() == 'aruba':
+        return move_aruba(app_cfg, switch)
     else:
         app.logger.error("Unsupported type of switch (type: %s)" % (switch['type']))
         return 1
@@ -196,11 +274,23 @@ def get_conf_hp(app_cfg, switch):
             return {'all': config.read()}
 
 
+def get_conf_aruba(app_cfg, switch):
+    tmp_file_path = "%s/%s_rc_struct.cfg" % (app_cfg['backup_dir_path'], switch['name'])
+    if not os.access(tmp_file_path, os.R_OK):
+        app.logger.error("Fail to read %s, expected file %s" % (switch['name'], tmp_file_path))
+        return None
+    else:
+        with open(tmp_file_path, 'rt') as config:
+            return {'all': config.read()}
+
+
 def get_config(app_cfg, switch):
     if switch['type'].lower() == '3com':
         return get_conf_3com(app_cfg, switch)
     elif switch['type'].lower() == 'hp':
         return get_conf_hp(app_cfg, switch)
+    elif switch['type'].lower() == 'aruba':
+        return get_conf_aruba(app_cfg, switch)
     else:
         app.logger.error("Unsupported type of switch (type: %s)" % (switch['type']))
         return 1
